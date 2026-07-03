@@ -327,12 +327,21 @@ async function runCollection() {
   }
 }
 
-function main() {
+const RUN_ONCE = process.env.RUN_ONCE === 'true';
+
+async function main() {
   ensureDir(SNAPSHOTS_DIR);
   db.initDb();
   console.log('AgentIndex collector starting.');
-  console.log(`Collection interval: ${INTERVAL_MINUTES} minutes.`);
 
+  if (RUN_ONCE) {
+    console.log('RUN_ONCE mode: running a single collection cycle.');
+    await runCollection();
+    process.exit(0);
+    return;
+  }
+
+  console.log(`Collection interval: ${INTERVAL_MINUTES} minutes.`);
   runCollection();
   setInterval(runCollection, INTERVAL_MINUTES * 60 * 1000);
 }
