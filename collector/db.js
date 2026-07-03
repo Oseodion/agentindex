@@ -151,6 +151,62 @@ function getCategoryBreakdown() {
     .all();
 }
 
+// --- Query functions added for the Phase 2 MCP server ---
+
+function getAgentsByCategory(category) {
+  return getDb()
+    .prepare('SELECT * FROM agents WHERE category = ? ORDER BY sales DESC')
+    .all(category);
+}
+
+function getKnownCategories() {
+  return getDb()
+    .prepare('SELECT DISTINCT category FROM agents WHERE category IS NOT NULL')
+    .all()
+    .map((row) => row.category);
+}
+
+function getNewAgentsCountSince(isoDate) {
+  return getDb()
+    .prepare('SELECT COUNT(*) AS count FROM agents WHERE first_seen_at >= ?')
+    .get(isoDate).count;
+}
+
+// Sum of per-agent sales growth over the last 24 hours. Baseline for each
+// agent is its latest snapshot at or before the 24h cutoff; if the agent has
+// no snapshot that old (fresh database), its earliest snapshot is used so the
+// delta still reflects growth observed within the window.
+function getSalesLast24h() {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const rows = getDb()
+    .prepare(
+      `SELECT
+         s.agent_name,
+         (SELECT sales FROM snapshots s2 WHERE s2.agent_name = s.agent_name
+          ORDER BY s2.captured_at DESC LIMIT 1) AS latest_sales,
+         COALESCE(
+           (SELECT sales FROM snapshots s3 WHERE s3.agent_name = s.agent_name
+            AND s3.captured_at <= ? ORDER BY s3.captured_at DESC LIMIT 1),
+           (SELECT sales FROM snapshots s4 WHERE s4.agent_name = s.agent_name
+            ORDER BY s4.captured_at ASC LIMIT 1)
+         ) AS baseline_sales
+       FROM snapshots s GROUP BY s.agent_name`
+    )
+    .all(cutoff);
+
+  return rows.reduce((sum, row) => {
+    const delta = (row.latest_sales || 0) - (row.baseline_sales || 0);
+    return sum + Math.max(0, delta);
+  }, 0);
+}
+
+function getDataFreshness() {
+  const row = getDb()
+    .prepare('SELECT MAX(last_updated_at) AS latest FROM agents')
+    .get();
+  return row ? row.latest : null;
+}
+
 module.exports = {
   initDb,
   insertOrUpdateAgent,
@@ -160,4 +216,9 @@ module.exports = {
   getAgentHistory,
   getDailySummaries,
   getCategoryBreakdown,
+  getAgentsByCategory,
+  getKnownCategories,
+  getNewAgentsCountSince,
+  getSalesLast24h,
+  getDataFreshness,
 };
