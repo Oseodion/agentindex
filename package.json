@@ -1,0 +1,15 @@
+{
+  "name": "agentindex",
+  "version": "0.1.0",
+  "description": "Market intelligence MCP server for the OKX.AI agent economy",
+  "main": "collector/index.js",
+  "scripts": {
+    "start": "node collector/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "cheerio": "^1.0.0",
+    "playwright": "^1.47.0",
+    "dotenv": "^16.4.5"
+  }
+}

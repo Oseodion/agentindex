@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Database
+data/agentindex.db
+data/agentindex.db-wal
+data/agentindex.db-shm
+data/api-config.json
+
+# Environment
+.env
+
+# Snapshots (raw HTML, too large for git)
+data/snapshots/*
+!data/snapshots/.gitkeep
+
+# Logs
+*.log
