@@ -37,6 +37,9 @@ jobs:
         env:
           RUN_ONCE: 'true'
 
+      - name: Keep server alive
+        run: curl -s https://agentindex-ngcn.onrender.com/health
+
       - name: Commit and push updated database
         run: |
           git config user.name "github-actions[bot]"
