@@ -39,6 +39,28 @@ const TOOL_PRICES_USD = {
 };
 const PRICE_CAP_USD = Math.max(...Object.values(TOOL_PRICES_USD)); // 1.00
 
+// JSON-RPC methods that are MCP protocol handshake/introspection, not billable
+// tool invocations. These must reach the server for free — the x402 route
+// table has no concept of "free within this route," so a request that only
+// contains these methods is bypassed around the payment middleware entirely
+// (see the bypass middleware below).
+const PROTOCOL_METHODS = new Set([
+  'initialize',
+  'tools/list',
+  'notifications/initialized',
+  'ping',
+]);
+
+// True when every message in the body (single or batch) is a protocol-level
+// method. A batch mixing a protocol method with a real tools/call is NOT
+// exempt — any tools/call present routes the whole request through payment.
+function isProtocolOnlyRequest(body) {
+  if (!body) return false;
+  const messages = Array.isArray(body) ? body : [body];
+  if (messages.length === 0) return false;
+  return messages.every((msg) => msg && PROTOCOL_METHODS.has(msg.method));
+}
+
 // Compute the settlement amount for one JSON-RPC body (single message or
 // batch). Only tools/call messages with a known tool name are billed;
 // protocol traffic (initialize, tools/list, notifications, ping) settles
@@ -120,28 +142,10 @@ app.get('/health', (_req, res) => {
   });
 });
 
-if (paymentMiddleware) {
-  // Global mount (per SELLER.md): the middleware matches its own
-  // "POST /mcp" route table against req.path. Mounting at a path prefix
-  // (app.use('/mcp', ...)) would strip the prefix and the route table
-  // would never match, silently serving tools unpaid.
-  app.use(paymentMiddleware);
-} else {
-  // Never serve the tools for free: without a working payment layer,
-  // /mcp is unavailable rather than unpaid.
-  app.use('/mcp', (_req, res) => {
-    res.status(503).json({
-      error: 'Payment layer unavailable; /mcp is disabled.',
-      detail: paymentSetupError ? paymentSetupError.message : 'unknown',
-    });
-  });
-}
-
-// Stateless MCP: one server + transport pair per request.
-app.post('/mcp', async (req, res) => {
+// Stateless MCP: one server + transport pair per request. Shared by both
+// the free protocol-level path and the post-payment path below.
+async function handleMcpRequest(req, res) {
   try {
-    setSettlementOverrides(res, { amount: settlementAmountFor(req.body) });
-
     const mcpServer = createServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless mode
@@ -163,6 +167,42 @@ app.post('/mcp', async (req, res) => {
       });
     }
   }
+}
+
+// Bypass: MCP protocol-level requests (initialize, tools/list, ping, ...)
+// are not billable and must reach the server even with no payment. Checked
+// before the payment middleware; anything else (tools/call) falls through
+// to it via next().
+app.post('/mcp', (req, res, next) => {
+  if (isProtocolOnlyRequest(req.body)) {
+    return handleMcpRequest(req, res);
+  }
+  next();
+});
+
+if (paymentMiddleware) {
+  // Global mount (per SELLER.md): the middleware matches its own
+  // "POST /mcp" route table against req.path. Mounting at a path prefix
+  // (app.use('/mcp', ...)) would strip the prefix and the route table
+  // would never match, silently serving tools unpaid.
+  app.use(paymentMiddleware);
+} else {
+  // Never serve the tools for free: without a working payment layer,
+  // /mcp is unavailable rather than unpaid.
+  app.use('/mcp', (_req, res) => {
+    res.status(503).json({
+      error: 'Payment layer unavailable; /mcp is disabled.',
+      detail: paymentSetupError ? paymentSetupError.message : 'unknown',
+    });
+  });
+}
+
+// Reached only after payment middleware has verified/settled a tools/call.
+app.post('/mcp', (req, res) => {
+  if (paymentMiddleware) {
+    setSettlementOverrides(res, { amount: settlementAmountFor(req.body) });
+  }
+  return handleMcpRequest(req, res);
 });
 
 // Stateless server: no SSE streams to resume, no sessions to delete.
