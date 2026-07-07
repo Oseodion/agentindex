@@ -1,15 +1,16 @@
 // server/http.js - Phase 3 HTTP entry point
 // Wraps the same 5 MCP tools (from server/index.js) behind Express with
-// x402 payment middleware. Paying agents POST /mcp and pay per tool call
-// in USDT0 on X Layer (eip155:196). Unpaid requests get a 402 challenge.
+// x402 payment middleware. Paying agents POST /mcp and pay a flat 0.50
+// USDT0 per tool call on X Layer (eip155:196). Unpaid requests get a 402
+// challenge.
 //
-// Pricing design: setSettlementOverrides requires the `upto` scheme -
-// the buyer signs a spending cap (the price of the most expensive tool)
-// and the server settles the actual per-tool amount, which must be <= cap.
-// `exact` (EIP-3009) signs a fixed amount that cannot vary at settlement,
-// so it cannot express per-tool pricing on a single /mcp route. The
-// ExactEvmScheme is still registered on the resource server (capability),
-// but the offered payment option is `upto` with a $1.00 cap.
+// Pricing design: flat `exact` (EIP-3009) at $0.50 for every tools/call,
+// matching the fee registered on-chain for this ASP's service listing
+// 1:1. `exact` signs a single fixed amount per request - no settlement
+// overrides, no cap, no per-tool variance. (An earlier `upto`-based
+// per-tool pricing design was reverted: the on-chain listing shows one
+// flat fee, and a variable-cap challenge disagreeing with that fee is the
+// most likely cause of an "x402 verification failed" listing rejection.)
 require('dotenv').config();
 const express = require('express');
 const { OKXFacilitatorClient } = require('@okxweb3/x402-core');
@@ -17,10 +18,8 @@ const {
   x402ResourceServer,
   x402HTTPResourceServer,
   paymentMiddlewareFromHTTPServer,
-  setSettlementOverrides,
 } = require('@okxweb3/x402-express');
 const { ExactEvmScheme } = require('@okxweb3/x402-evm/exact/server');
-const { UptoEvmScheme } = require('@okxweb3/x402-evm/upto/server');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
 const { createServer } = require('./index.js');
@@ -28,16 +27,7 @@ const { createServer } = require('./index.js');
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const PAY_TO = process.env.PAYMENT_ADDRESS || '0xdf54982caada64c73f7f27afc11a9600a36625aa';
 const NETWORK = 'eip155:196'; // X Layer mainnet
-
-// Per-tool prices in USD. The `upto` cap must be >= the max price here.
-const TOOL_PRICES_USD = {
-  market_overview: 0.10,
-  category_report: 0.50,
-  pricing_benchmark: 0.50,
-  gap_finder: 1.00,
-  agent_profile: 0.25,
-};
-const PRICE_CAP_USD = Math.max(...Object.values(TOOL_PRICES_USD)); // 1.00
+const PRICE_USD = 0.50; // flat fee per tool call, matches the on-chain listing
 
 // JSON-RPC methods that are MCP protocol handshake/introspection, not billable
 // tool invocations. These must reach the server for free — the x402 route
@@ -61,25 +51,6 @@ function isProtocolOnlyRequest(body) {
   return messages.every((msg) => msg && PROTOCOL_METHODS.has(msg.method));
 }
 
-// Compute the settlement amount for one JSON-RPC body (single message or
-// batch). Only tools/call messages with a known tool name are billed;
-// protocol traffic (initialize, tools/list, notifications, ping) settles
-// "0" which short-circuits with no on-chain transaction. Batches sum the
-// per-tool prices, clamped to the signed cap.
-function settlementAmountFor(body) {
-  const messages = Array.isArray(body) ? body : [body];
-  let totalUsd = 0;
-  for (const msg of messages) {
-    if (msg && msg.method === 'tools/call') {
-      const toolName = msg.params && msg.params.name;
-      const price = TOOL_PRICES_USD[toolName];
-      if (typeof price === 'number') totalUsd += price;
-    }
-  }
-  if (totalUsd <= 0) return '0';
-  return `$${Math.min(totalUsd, PRICE_CAP_USD).toFixed(2)}`;
-}
-
 // --- payment layer (graceful: server still starts if this fails) ---
 
 let resourceServer = null;
@@ -95,22 +66,18 @@ try {
   });
 
   resourceServer = new x402ResourceServer(facilitatorClient)
-    .register(NETWORK, new ExactEvmScheme())
-    .register(NETWORK, new UptoEvmScheme());
+    .register(NETWORK, new ExactEvmScheme());
 
   const httpServer = new x402HTTPResourceServer(resourceServer, {
     'POST /mcp': {
       accepts: {
-        scheme: 'upto',
+        scheme: 'exact',
         network: NETWORK,
         payTo: PAY_TO,
-        price: `$${PRICE_CAP_USD.toFixed(2)}`, // cap; actual amount set per call
+        price: `$${PRICE_USD.toFixed(2)}`,
         maxTimeoutSeconds: 300,
       },
-      description:
-        'AgentIndex - OKX.AI marketplace intelligence over MCP. ' +
-        'Per-tool pricing (settled from your signed cap): market_overview $0.10, ' +
-        'category_report $0.50, pricing_benchmark $0.50, gap_finder $1.00, agent_profile $0.25.',
+      description: 'AgentIndex - OKX.AI marketplace intelligence over MCP. Flat 0.50 USDT per tool call.',
       mimeType: 'application/json',
     },
   });
@@ -205,12 +172,8 @@ if (paymentMiddleware) {
 }
 
 // Reached only after payment middleware has verified/settled a tools/call.
-app.post('/mcp', (req, res) => {
-  if (paymentMiddleware) {
-    setSettlementOverrides(res, { amount: settlementAmountFor(req.body) });
-  }
-  return handleMcpRequest(req, res);
-});
+// `exact` signs and settles a fixed amount - no settlement override needed.
+app.post('/mcp', handleMcpRequest);
 
 // Stateless server: no SSE streams to resume, no sessions to delete.
 app.get('/mcp', (_req, res) => {
