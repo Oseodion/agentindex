@@ -124,6 +124,13 @@ try {
 // --- express app ---
 
 const app = express();
+// Render (and most PaaS) terminate TLS at a reverse proxy and forward plain
+// HTTP internally, setting X-Forwarded-Proto: https. Without trust proxy,
+// req.protocol reports "http" even for real HTTPS requests, which leaked
+// into the x402 challenge's resource.url (built from req.protocol) as
+// "http://...". A scheme mismatch against the https:// endpoint registered
+// on-chain fails the marketplace's x402 verification during listing review.
+app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 
 app.get('/health', (_req, res) => {
