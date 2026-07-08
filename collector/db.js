@@ -126,6 +126,12 @@ function upsertDailySummary(summary) {
          captured_at = excluded.captured_at`
     )
     .run(summary);
+
+  // upsertDailySummary is always the last write of a collection run (see
+  // collector/index.js). In WAL mode, writes land in -wal/-shm until a
+  // checkpoint flushes them into the main .db file, so without this the
+  // committed data/agentindex.db never changes and git sees no diff.
+  getDb().pragma('wal_checkpoint(TRUNCATE)');
 }
 
 function getAllAgents() {
